@@ -5,6 +5,8 @@ package jsonformat
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 
 	"github.com/mitchellh/colorstring"
@@ -23,6 +25,7 @@ import (
 )
 
 type JSONLogType string
+type GeneratedConfigWriterLoader func() (io.Writer, func() error, error)
 
 type JSONLog struct {
 	Message    string                 `json:"@message"`
@@ -30,6 +33,15 @@ type JSONLog struct {
 	Diagnostic *viewsjson.Diagnostic  `json:"diagnostic"`
 	Outputs    viewsjson.Outputs      `json:"outputs"`
 	Hook       map[string]interface{} `json:"hook"`
+}
+
+type Renderer struct {
+	Streams  *terminal.Streams
+	Colorize *colorstring.Colorize
+
+	GeneratedConfigWriter GeneratedConfigWriterLoader
+
+	RunningInAutomation bool
 }
 
 const (
@@ -50,36 +62,36 @@ const (
 	LogVersion           JSONLogType = "version"
 )
 
-func incompatibleVersions(localVersion, remoteVersion string) bool {
-	var parsedLocal, parsedRemote float64
-	var err error
+func LoadGeneratedConfigWriter() (io.Writer, func() error, error) {
+	var alreadyExists bool
 
-	if parsedLocal, err = strconv.ParseFloat(localVersion, 64); err != nil {
-		return false
-	}
-	if parsedRemote, err = strconv.ParseFloat(remoteVersion, 64); err != nil {
-		return false
+	_, err := os.Stat("generated_config.tf")
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, nil, err
+		}
+		alreadyExists = true
 	}
 
-	// If the local version is less than the remote version then the remote
-	// version might contain things the local version doesn't know about, so
-	// we're going to say they are incompatible.
-	//
-	// So far, we have built the renderer and the json packages to be backwards
-	// compatible so if the local version is greater than the remote version
-	// then that is okay, we'll still render a complete and correct plan.
-	//
-	// Note, this might change in the future. For example, if we introduce a
-	// new major version in one of the formats the renderer may no longer be
-	// backward compatible.
-	return parsedLocal < parsedRemote
+	file, err := os.OpenFile("generated_config.tf", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if alreadyExists {
+		file.WriteString("# __generated__ by Terraform\n# Please review and move imported resources into your main configuration files.\n")
+	}
+
+	return file, file.Close, nil
 }
 
-type Renderer struct {
-	Streams  *terminal.Streams
-	Colorize *colorstring.Colorize
-
-	RunningInAutomation bool
+func NewRenderer(streams *terminal.Streams, colorize *colorstring.Colorize, configWriter GeneratedConfigWriterLoader) Renderer {
+	return Renderer{
+		Streams:               streams,
+		Colorize:              colorize,
+		GeneratedConfigWriter: configWriter,
+		RunningInAutomation:   false,
+	}
 }
 
 func (renderer Renderer) RenderHumanPlan(plan Plan, mode plans.Mode, opts ...PlanRendererOpt) {
@@ -174,4 +186,29 @@ func (renderer Renderer) RenderLog(log *JSONLog) error {
 	}
 
 	return nil
+}
+
+func incompatibleVersions(localVersion, remoteVersion string) bool {
+	var parsedLocal, parsedRemote float64
+	var err error
+
+	if parsedLocal, err = strconv.ParseFloat(localVersion, 64); err != nil {
+		return false
+	}
+	if parsedRemote, err = strconv.ParseFloat(remoteVersion, 64); err != nil {
+		return false
+	}
+
+	// If the local version is less than the remote version then the remote
+	// version might contain things the local version doesn't know about, so
+	// we're going to say they are incompatible.
+	//
+	// So far, we have built the renderer and the json packages to be backwards
+	// compatible so if the local version is greater than the remote version
+	// then that is okay, we'll still render a complete and correct plan.
+	//
+	// Note, this might change in the future. For example, if we introduce a
+	// new major version in one of the formats the renderer may no longer be
+	// backward compatible.
+	return parsedLocal < parsedRemote
 }

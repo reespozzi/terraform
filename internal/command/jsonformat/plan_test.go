@@ -4,8 +4,10 @@
 package jsonformat
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -103,8 +105,9 @@ func TestRenderHuman_Imports(t *testing.T) {
 	}
 
 	tcs := map[string]struct {
-		plan   Plan
-		output string
+		plan      Plan
+		output    string
+		generated string
 	}{
 		"simple_import": {
 			plan: Plan{
@@ -136,6 +139,56 @@ func TestRenderHuman_Imports(t *testing.T) {
 Terraform will perform the following actions:
 
   # test_resource.resource will be imported
+    resource "test_resource" "resource" {
+        id    = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
+        value = "Hello, World!"
+    }
+
+Plan: 0 to add, 1 to import, 0 to change, 0 to destroy.
+`,
+		},
+		"simple_import_with_generated_config": {
+			plan: Plan{
+				ResourceChanges: []jsonplan.ResourceChange{
+					{
+						Address:      "test_resource.resource",
+						Mode:         "managed",
+						Type:         "test_resource",
+						Name:         "resource",
+						ProviderName: "test",
+						Change: jsonplan.Change{
+							Actions: []string{"no-op"},
+							Before: marshalJson(t, map[string]interface{}{
+								"id":    "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E",
+								"value": "Hello, World!",
+							}),
+							After: marshalJson(t, map[string]interface{}{
+								"id":    "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E",
+								"value": "Hello, World!",
+							}),
+							Importing: &jsonplan.Importing{
+								ID: "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E",
+							},
+							GeneratedConfig: `resource "test_resource" "resource" {
+  id = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
+  value = "Hello, World!"
+}`,
+						},
+					},
+				},
+			},
+			generated: `
+# __generated__ from "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
+resource "test_resource" "resource" {
+  id = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
+  value = "Hello, World!"
+}
+`,
+			output: `
+Terraform will perform the following actions:
+
+  # test_resource.resource will be imported
+  # (generated config has been written to generated_config.tf)
     resource "test_resource" "resource" {
         id    = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
         value = "Hello, World!"
@@ -369,9 +422,14 @@ Plan: 1 to add, 1 to import, 0 to change, 1 to destroy.
 			plan.ProviderFormatVersion = jsonprovider.FormatVersion
 			plan.ProviderSchemas = schemas
 
+			var buf bytes.Buffer
+
 			renderer := Renderer{
 				Colorize: color,
 				Streams:  streams,
+				GeneratedConfigWriter: func() (io.Writer, func() error, error) {
+					return &buf, func() error { return nil }, nil
+				},
 			}
 			plan.renderHuman(renderer, plans.NormalMode)
 
@@ -379,6 +437,17 @@ Plan: 1 to add, 1 to import, 0 to change, 1 to destroy.
 			want := tc.output
 			if diff := cmp.Diff(want, got); len(diff) > 0 {
 				t.Errorf("unexpected output\ngot:\n%s\nwant:\n%s\ndiff:\n%s", got, want, diff)
+			}
+
+			generatedConfig := buf.String()
+			if len(tc.generated) > 0 {
+				got := generatedConfig
+				want := tc.generated
+				if diff := cmp.Diff(want, got); len(diff) > 0 {
+					t.Errorf("unexpected generated config\ngot:\n%s\nwant:\n%s\ndiff:\n%s", got, want, diff)
+				}
+			} else if len(generatedConfig) > 0 {
+				t.Errorf("unexpected generated config, expected nothing but got:\n%s", generatedConfig)
 			}
 		})
 	}

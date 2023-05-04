@@ -127,7 +127,7 @@ func (plan Plan) renderHuman(renderer Renderer, mode plans.Mode, opts ...PlanRen
 			case plans.DestroyMode:
 				if haveRefreshChanges {
 					renderer.Streams.Print(format.HorizontalRule(renderer.Colorize, renderer.Streams.Stdout.Columns()))
-					fmt.Fprintln(renderer.Streams.Stdout.File)
+					renderer.Streams.Println()
 				}
 				renderer.Streams.Print(renderer.Colorize.Color("\n[reset][bold][green]No changes.[reset][bold] No objects need to be destroyed.[reset]\n\n"))
 				renderer.Streams.Println(format.WordWrap(
@@ -136,7 +136,7 @@ func (plan Plan) renderHuman(renderer Renderer, mode plans.Mode, opts ...PlanRen
 			default:
 				if haveRefreshChanges {
 					renderer.Streams.Print(format.HorizontalRule(renderer.Colorize, renderer.Streams.Stdout.Columns()))
-					renderer.Streams.Println("")
+					renderer.Streams.Println()
 				}
 				renderer.Streams.Print(
 					renderer.Colorize.Color("\n[reset][bold][green]No changes.[reset][bold] Your infrastructure matches the configuration.[reset]\n\n"),
@@ -219,7 +219,11 @@ func (plan Plan) renderHuman(renderer Renderer, mode plans.Mode, opts ...PlanRen
 		for _, change := range changes {
 			diff, render := renderHumanDiff(renderer, change, proposedChange)
 			if render {
-				fmt.Fprintln(renderer.Streams.Stdout.File)
+				if len(change.change.Change.GeneratedConfig) > 0 {
+					writeGeneratedConfig(renderer, change)
+				}
+
+				renderer.Streams.Println()
 				renderer.Streams.Println(diff)
 			}
 		}
@@ -337,6 +341,26 @@ func renderHumanDiffDrift(renderer Renderer, diffs diffs, mode plans.Mode) bool 
 	}
 
 	return true
+}
+
+func writeGeneratedConfig(renderer Renderer, change diff) {
+	if renderer.GeneratedConfigWriter != nil {
+		writer, closer, err := renderer.GeneratedConfigWriter()
+		if err != nil {
+			renderer.Streams.Eprintf("found generated config for %s, but failed to open target target: %v.\n", change.change.Address, err)
+			return
+		}
+		defer closer()
+		if change.change.Change.Importing != nil && len(change.change.Change.Importing.ID) > 0 {
+			writer.Write([]byte(fmt.Sprintf("\n# __generated__ from %q\n", change.change.Change.Importing.ID)))
+		} else {
+			writer.Write([]byte("\n# __generated__ by Terraform\n"))
+		}
+		writer.Write([]byte(change.change.Change.GeneratedConfig))
+		writer.Write([]byte("\n"))
+	} else {
+		renderer.Streams.Eprintf("found generated config for %s, but had no where to write it.\n", change.change.Address)
+	}
 }
 
 func renderHumanDiff(renderer Renderer, diff diff, cause string) (string, bool) {
@@ -468,6 +492,9 @@ func resourceChangeComment(resource jsonplan.ResourceChange, action plans.Action
 		}
 		if resource.Change.Importing != nil {
 			buf.WriteString(fmt.Sprintf("[bold]  # %s[reset] will be imported", dispAddr))
+			if len(resource.Change.GeneratedConfig) > 0 {
+				buf.WriteString("\n  #[reset] (generated config has been written to generated_config.tf)")
+			}
 			printedImported = true
 			break
 		}
